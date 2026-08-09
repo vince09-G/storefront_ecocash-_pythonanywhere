@@ -1,4 +1,6 @@
-from django.shortcuts import render
+from urllib import response
+
+from django.shortcuts import render, redirect
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter,OrderingFilter
 from rest_framework.pagination import PageNumberPagination
@@ -8,11 +10,15 @@ from rest_framework.response import Response
 from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView
 from rest_framework.viewsets import ModelViewSet, GenericViewSet
 from rest_framework.mixins import CreateModelMixin,RetrieveModelMixin,DestroyModelMixin, UpdateModelMixin
-from .models import Product,ProductImage, Collection, Review, Cart,CartItem, Customer, Order, Orderitem
+from .models import Product,ProductImage, Collection, Review, Cart,CartItem, Customer, Order, Orderitem, Payment
 from .serializer import ProductSerializer,CollectionSerializer, ReviewSerializer, CartSerializer,CartItemSerializer,AddCartItemSerializer,CartItemQuantitySerializer,CustomerSerializer,OrderSerializer,CreateOrderSerializer, OrderItemSerializer,UpdateOrderSerializer, ProductImageSerializer
 from .filters import ProductFilter
 from .permissions import IsAdminOrReadOnly
-from django.contrib.auth.decorators import login_required
+from django.conf import settings
+from django.http import HttpResponse
+import requests
+import uuid
+from decimal import Decimal
 # Create your views here.
 class ProductViewset(ModelViewSet):
     queryset= Product.objects.prefetch_related('images').all()
@@ -151,72 +157,150 @@ def product_detail_page(request, id):
 def checkout_page(request):
     return render(request, "checkout.html")
 
+from django.conf import settings
+from django.shortcuts import redirect
+from django.http import JsonResponse
+import requests
+import uuid
+import json
+def start_payment(request, order_id):
 
-#from .services import initiate_ecocash_payment
-from rest_framework.decorators import api_view
-from rest_framework.response import Response
-from rest_framework import status
-from decimal import Decimal
-from .models import Order
-from .services import initiate_ecocash_payment  # your payment function
+    if request.method != "POST":
+        return JsonResponse({
+            "success": False,
+            "message": "POST request required"
+        }, status=400)
 
-@api_view(['POST'])
-def pay_order_ecocash(request, pk):
-    print("----- DEBUG START -----")
+    order = Order.objects.get(id=order_id)
 
-    try:
-        order = Order.objects.get(pk=pk)
-    except Order.DoesNotExist:
-        return Response({"error": "Order not found"}, status=404)
+    total = sum(
+        item.quantity * item.unit_price
+        for item in order.items.all()
+    )
 
-    msisdn = request.data.get("msisdn")
-    print("Received MSISDN:", msisdn)
-    print("Order ID:", order.id)
-    print("Order Items:", order.items.all())
+    data = json.loads(request.body)
 
-    if not msisdn:
-        return Response({"error": "Phone number required"}, status=status.HTTP_400_BAD_REQUEST)
+    phone = data.get("phone")
 
-    # Calculate total
-    total = Decimal("0.00")
-    for item in order.items.all():
-        total += item.quantity * item.unit_price
-    print("Calculated TOTAL:", total)
-    print("----- DEBUG END -----")
+    if not phone:
+        return JsonResponse({
+            "success": False,
+            "message": "Phone number is required"
+        }, status=400)
 
-    if total <= 0:
-        return Response({"error": "Order total must be greater than zero"}, status=status.HTTP_400_BAD_REQUEST)
+    source_reference = str(uuid.uuid4())
 
-    # Call EcoCash API safely
-    try:
-        response = initiate_ecocash_payment(
-            msisdn=msisdn,
-            amount=float(total),
-            order_id=order.id
-        )
-        print("EcoCash RAW RESPONSE:", response)
-        print("Response content:", response.text)
-    except Exception as e:
-        print("EcoCash Exception:", str(e))
-        return Response({"error": "Payment gateway error", "details": str(e)}, status=500)
+    payload = {
+        "customerMsisdn": phone,
+        "amount": float(total),
+        "reason": f"Order {order.id}",
+        "currency": "USD",
+        "sourceReference": source_reference
+    }
 
-    # Try to parse JSON only if content exists
-    data = {}
-    if response.text.strip():
-        try:
-            data = response.json()
-            print("EcoCash JSON:", data)
-        except Exception as e:
-            print("JSON Parse Error:", str(e))
-            # fallback if response not JSON
-            data = {"success": True, "message": "Payment request sent (sandbox)"}  
-    else:
-        # empty response, assume sandbox success
-        data = {"success": True, "message": "Payment request sent (sandbox)"}
+    headers = {
+        "X-API-KEY": settings.ECOCASH_API_KEY,
+        "Content-Type": "application/json"
+    }
 
-    # Update order if API call succeeded
+    response = requests.post(
+        settings.ECOCASH_PAYMENT_URL,
+        json=payload,
+        headers=headers
+    )
+    print("PAYMENT RESPONSE CODE:", response.status_code)
+    print("PAYMENT RESPONSE:", response.text)
+
     if response.status_code == 200:
-        order.payment_status = "Processing"
-        order.save()
 
-    return Response(data, status=response.status_code)
+        payment = Payment.objects.create(
+            order=order,
+            amount=total,
+            status=Payment.STATUS_PENDING,
+            reference=source_reference
+        )
+
+        return JsonResponse({
+            "success": True,
+            "payment_id": payment.id,
+            "message": (
+                "Payment request sent. "
+                "Check your EcoCash phone and enter your PIN."
+            )
+        })
+
+    return JsonResponse({
+        "success": False,
+        "message": response.text
+    }, status=response.status_code)
+
+def check_payment_status(request, payment_id):
+
+    payment = Payment.objects.get(id=payment_id)
+
+    phone = request.GET.get("phone")
+
+    payload = {
+        "sourceMobileNumber": phone,
+        "sourceReference": payment.reference
+    }
+
+    headers = {
+        "X-API-KEY": settings.ECOCASH_API_KEY,
+        "Content-Type": "application/json"
+    }
+
+    response = requests.post(
+        settings.ECOCASH_LOOKUP_URL,
+        json=payload,
+        headers=headers
+    )
+
+    print("STATUS CODE:", response.status_code)
+    print("RESPONSE:", response.text)
+
+    return JsonResponse(response.json())
+
+
+# class ProductList(ListCreateAPIView):
+#     queryset= Product.objects.all()
+#     serializer_class= ProductSerializer
+
+# class ProductDetails(RetrieveUpdateDestroyAPIView):
+#     queryset= Product.objects.all()
+#     serializer_class= ProductSerializer
+  
+
+# class CollectionList(ListCreateAPIView):
+#     queryset= Collection.objects.all()
+#     serializer_class= CollectionSerializer
+
+# class CollectionDetails(RetrieveUpdateDestroyAPIView):
+#     queryset= Collection.objects.all()
+#     serializer_class= CollectionSerializer
+
+# @api_view(['GET', 'POST'])
+# def product_list(request):
+#     if request.method == 'GET':
+#         products=Product.objects.select_related('collection').all()
+#         serializer= ProductSerializer(products, many=True)
+#         return Response(serializer.data)
+#     elif request.method == 'POST':
+#         serializer= ProductSerializer(data= request.data)
+#         serializer.is_valid(raise_exception=True)
+#         serializer.save()
+
+#         return Response(serializer.data)
+
+# @api_view(['GET', 'PUT'])
+# def product_detail(request, id):
+#     product= get_object_or_404(Product, pk=id)
+#     if request.method == 'GET':
+#         serializer= ProductSerializer(product)
+#         return Response(serializer.data)
+    
+#     elif request.method == 'PUT':
+#         serializer= ProductSerializer(product, data= request.data)
+#         serializer.is_valid(raise_exception=True)
+#         serializer.save()
+#         return Response(serializer.data)

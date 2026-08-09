@@ -95,12 +95,8 @@ WSGI_APPLICATION = 'storefront.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.mysql',
-        'NAME': os.getenv('DB_NAME'),
-        'USER': os.getenv('DB_USER'),
-        'PASSWORD': os.getenv('DB_PASSWORD'),
-        'HOST': os.getenv('DB_HOST'),
-        'PORT': os.getenv('DB_PORT'),
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': BASE_DIR / 'db.sqlite3',
     }
 }
 
@@ -170,6 +166,14 @@ SIMPLE_JWT={
     'ACCESS_TOKEN_LIFETIME': timedelta(days=1),
 }
 
-ECOCASH_API_KEY = "your_real_key_here"
+ECOCASH_API_KEY = os.getenv("ECOCASH_API_KEY")
 
-ECOCASH_C2B_SANDBOX_URL = "https://developers.ecocash.co.zw/api/ecocash_pay/api/v2/payment/instant/c2b/sandbox"
+ECOCASH_PAYMENT_URL = (
+    "https://developers.ecocash.co.zw/"
+    "api/ecocash_pay/api/v2/payment/instant/c2b/sandbox"
+)
+
+ECOCASH_LOOKUP_URL = (
+    "https://developers.ecocash.co.zw/"
+    "api/ecocash_pay/api/v1/transaction/c2b/status/sandbox"
+)
